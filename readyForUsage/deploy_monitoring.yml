@@ -14,13 +14,16 @@
     grafana_port: 3000
 
     node_exporter_port_monitoring: 9102
-    node_exporter_port_argentina: 9101
+    node_exporter_port_argentina: 9102
 
-    # Yugabyte в Аргентине
-    yugabyted_master_http: "149.104.92.119:7000"
-    yugabyted_tserver_http: "149.104.92.119:9000"
-    yugabyted_ysql_http: "149.104.92.119:13000"
-    node_exporter_argentina_target: "149.104.92.119:{{ node_exporter_port_argentina }}"
+    # Yugabyte в Литве
+    yugabyted_master_http: "80.208.229.107:7000"
+    yugabyted_tserver_http: "80.208.229.107:9000"
+    yugabyted_ysql_http: "80.208.229.107:13000"
+
+    # node_exporter на литовской машине (если нужен)
+    node_exporter_argentina_target: "80.208.229.107:{{ node_exporter_port_argentina }}"
+
 
   handlers:
     - name: reload systemd
@@ -35,6 +38,15 @@
       become: yes
 
   tasks:
+    - name: Remove broken Docker APT source files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/docker.list
+        - /etc/apt/sources.list.d/docker.sources
+      ignore_errors: yes
+
     - name: Install base deps (apt, curl, etc.)
       ansible.builtin.apt:
         name:
@@ -45,16 +57,25 @@
         update_cache: yes
         state: present
 
-    - name: Ensure Docker APT GPG key is present
-      ansible.builtin.apt_key:
+    - name: Create keyrings directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
         url: https://download.docker.com/linux/ubuntu/gpg
-        state: present
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+        force: no
 
     - name: Add Docker APT repository
       ansible.builtin.apt_repository:
-        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
         state: present
         filename: docker
+        update_cache: yes
 
     - name: Install Docker engine and compose plugin
       ansible.builtin.apt:
@@ -240,6 +261,7 @@
             src: /tmp/node_exporter-1.8.2.linux-amd64/node_exporter
             dest: /usr/local/bin/node_exporter
             mode: "0755"
+            remote_src: yes
       when: not node_exporter_bin_monitoring.stat.exists
 
     - name: Ensure node_exporter system user exists (monitoring host)
@@ -319,6 +341,7 @@
             src: /tmp/node_exporter-1.8.2.linux-amd64/node_exporter
             dest: /usr/local/bin/node_exporter
             mode: "0755"
+            remote_src: yes
       when: not node_exporter_bin_argentina.stat.exists
 
     - name: Ensure node_exporter system user exists (argentina host)
