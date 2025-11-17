@@ -31,7 +31,7 @@
         },
         "id": 100,
         "panels": [],
-        "title": "Node health (Argentina VM)",
+        "title": "Node health (3 nodes cluster)",
         "type": "row"
       },
       {
@@ -1113,25 +1113,25 @@
         },
         {
           "current": {
-            "text": "node_exporter_argentina",
-            "value": "node_exporter_argentina"
+            "text": "node_exporter",
+            "value": "node_exporter"
           },
           "hide": 2,
-          "label": "Node exporter (AR)",
-          "name": "job_node_ar",
-          "query": "node_exporter_argentina",
+          "label": "Node exporter job",
+          "name": "job_node",
+          "query": "node_exporter",
           "skipUrlSync": true,
           "type": "constant"
         },
         {
           "current": {
-            "text": "cluster-argentina",
-            "value": "cluster-argentina"
+            "text": "yugabytedb-cluster",
+            "value": "yugabytedb-cluster"
           },
           "hide": 2,
           "label": "Cluster",
-          "name": "cluster_prefix",
-          "query": "cluster-argentina",
+          "name": "cluster_name",
+          "query": "yugabytedb-cluster",
           "skipUrlSync": true,
           "type": "constant"
         }
