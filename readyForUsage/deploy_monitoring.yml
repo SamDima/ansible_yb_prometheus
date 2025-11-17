@@ -16,13 +16,13 @@
     node_exporter_port_monitoring: 9102
     node_exporter_port_argentina: 9102
 
-    # Yugabyte в Литве
-    yugabyted_master_http: "80.208.229.107:7000"
-    yugabyted_tserver_http: "80.208.229.107:9000"
-    yugabyted_ysql_http: "80.208.229.107:13000"
-
-    # node_exporter на литовской машине (если нужен)
-    node_exporter_argentina_target: "80.208.229.107:{{ node_exporter_port_argentina }}"
+    # YugabyteDB Cluster - 3 nodes (все в Литве)
+    # Node 1: Литва
+    yb_node1_ip: "80.208.229.107"
+    # Node 2: Литва
+    yb_node2_ip: "80.209.239.227"
+    # Node 3: Литва
+    yb_node3_ip: "212.24.98.67"
 
 
   handlers:
@@ -159,35 +159,84 @@
               static_configs:
                 - targets: ["localhost:{{ prometheus_port }}"]
 
-            - job_name: "node_exporter_local"
-              static_configs:
-                - targets: ["{{ ansible_host | default(inventory_hostname) }}:{{ node_exporter_port_monitoring }}"]
-
-            - job_name: "node_exporter_argentina"
+            - job_name: "node_exporter"
               static_configs:
                 - targets:
-                    - "{{ node_exporter_argentina_target }}"
+                    - "{{ yb_node1_ip }}:{{ node_exporter_port_argentina }}"
+                    - "{{ yb_node2_ip }}:{{ node_exporter_port_argentina }}"
+                    - "{{ yb_node3_ip }}:{{ node_exporter_port_monitoring }}"
 
             - job_name: "yugabytedb"
               metrics_path: /prometheus-metrics
               scrape_interval: 5s
 
               static_configs:
-                - targets: ["{{ yugabyted_master_http }}"]
+                # Node 1: Литва - Master
+                - targets: ["{{ yb_node1_ip }}:7000"]
                   labels:
                     export_type: "master_export"
+                    node: "node1"
+                    location: "lithuania"
 
-                - targets: ["{{ yugabyted_tserver_http }}"]
+                # Node 1: Литва - TServer
+                - targets: ["{{ yb_node1_ip }}:9000"]
                   labels:
                     export_type: "tserver_export"
+                    node: "node1"
+                    location: "lithuania"
 
-                - targets: ["{{ yugabyted_ysql_http }}"]
+                # Node 1: Литва - YSQL
+                - targets: ["{{ yb_node1_ip }}:13000"]
                   labels:
                     export_type: "ysql_export"
+                    node: "node1"
+                    location: "lithuania"
+
+                # Node 2: Литва - Master
+                - targets: ["{{ yb_node2_ip }}:7000"]
+                  labels:
+                    export_type: "master_export"
+                    node: "node2"
+                    location: "lithuania"
+
+                # Node 2: Литва - TServer
+                - targets: ["{{ yb_node2_ip }}:9000"]
+                  labels:
+                    export_type: "tserver_export"
+                    node: "node2"
+                    location: "lithuania"
+
+                # Node 2: Литва - YSQL
+                - targets: ["{{ yb_node2_ip }}:13000"]
+                  labels:
+                    export_type: "ysql_export"
+                    node: "node2"
+                    location: "lithuania"
+
+                # Node 3: Литва - Master
+                - targets: ["{{ yb_node3_ip }}:7000"]
+                  labels:
+                    export_type: "master_export"
+                    node: "node3"
+                    location: "lithuania"
+
+                # Node 3: Литва - TServer
+                - targets: ["{{ yb_node3_ip }}:9000"]
+                  labels:
+                    export_type: "tserver_export"
+                    node: "node3"
+                    location: "lithuania"
+
+                # Node 3: Литва - YSQL
+                - targets: ["{{ yb_node3_ip }}:13000"]
+                  labels:
+                    export_type: "ysql_export"
+                    node: "node3"
+                    location: "lithuania"
 
               relabel_configs:
-                - target_label: "node_prefix"
-                  replacement: "cluster-argentina"
+                - target_label: "cluster"
+                  replacement: "yugabytedb-cluster"
 
               metric_relabel_configs:
                 - source_labels: ["__name__"]
@@ -291,12 +340,12 @@
         - restart node_exporter
 
 
-- name: Install node_exporter on Argentina DB hosts
-  hosts: argentina
+- name: Install node_exporter on YugabyteDB nodes
+  hosts: yb_nodes
   become: yes
 
   vars:
-    node_exporter_port_argentina: 9101
+    node_exporter_port_argentina: 9102
 
   handlers:
     - name: reload systemd
