@@ -1,0 +1,10 @@
+---
+monitoring_root: /opt/monitoring
+
+prometheus_dir: "{{ monitoring_root }}/prometheus"
+alertmanager_dir: "{{ monitoring_root }}/alertmanager"
+grafana_dir: "{{ monitoring_root }}/grafana"
+
+prometheus_config: "{{ prometheus_dir }}/prometheus.yml"
+alertmanager_config: "{{ alertmanager_dir }}/alertmanager.yml"
+grafana_storage: "{{ grafana_dir }}"

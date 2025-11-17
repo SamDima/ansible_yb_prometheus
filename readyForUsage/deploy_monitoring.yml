@@ -1,0 +1,348 @@
+---
+- name: Deploy monitoring stack (Prometheus, Alertmanager, Grafana) on monitoring hosts
+  hosts: monitoring
+  become: yes
+
+  vars:
+    monitoring_root: /opt/monitoring
+    prometheus_config_dir: "{{ monitoring_root }}/prometheus"
+    alertmanager_config_dir: "{{ monitoring_root }}/alertmanager"
+    grafana_data_dir: "{{ monitoring_root }}/grafana"
+
+    prometheus_port: 9090
+    alertmanager_port: 9093
+    grafana_port: 3000
+
+    node_exporter_port_monitoring: 9102
+    node_exporter_port_argentina: 9101
+
+    # Yugabyte в Аргентине
+    yugabyted_master_http: "149.104.92.119:7000"
+    yugabyted_tserver_http: "149.104.92.119:9000"
+    yugabyted_ysql_http: "149.104.92.119:13000"
+    node_exporter_argentina_target: "149.104.92.119:{{ node_exporter_port_argentina }}"
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.command: systemctl daemon-reload
+      become: yes
+
+    - name: restart node_exporter
+      ansible.builtin.service:
+        name: node_exporter
+        state: restarted
+        enabled: yes
+      become: yes
+
+  tasks:
+    - name: Install base deps (apt, curl, etc.)
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        update_cache: yes
+        state: present
+
+    - name: Ensure Docker APT GPG key is present
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+        filename: docker
+
+    - name: Install Docker engine and compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        update_cache: yes
+        state: present
+
+    - name: Ensure Docker service is enabled and running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create monitoring directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ monitoring_root }}"
+        - "{{ prometheus_config_dir }}"
+        - "{{ alertmanager_config_dir }}"
+        - "{{ grafana_data_dir }}"
+
+    - name: Ensure grafana data dir is writable by container (uid 472)
+      ansible.builtin.file:
+        path: "{{ grafana_data_dir }}"
+        state: directory
+        owner: 472
+        group: 472
+        mode: "0755"
+
+    - name: Write docker-compose.yml for monitoring stack
+      ansible.builtin.copy:
+        dest: "{{ monitoring_root }}/docker-compose.yml"
+        mode: "0644"
+        content: |
+          services:
+            prometheus:
+              image: prom/prometheus
+              container_name: prometheus
+              volumes:
+                - ./prometheus:/etc/prometheus
+              ports:
+                - "{{ prometheus_port }}:9090"
+              restart: unless-stopped
+
+            alertmanager:
+              image: prom/alertmanager
+              container_name: alertmanager
+              volumes:
+                - ./alertmanager:/etc/alertmanager
+              ports:
+                - "{{ alertmanager_port }}:9093"
+              restart: unless-stopped
+
+            grafana:
+              image: grafana/grafana
+              container_name: grafana
+              ports:
+                - "{{ grafana_port }}:3000"
+              volumes:
+                - ./grafana:/var/lib/grafana
+              restart: unless-stopped
+
+    - name: Write Prometheus config
+      ansible.builtin.copy:
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
+        mode: "0644"
+        content: |
+          global:
+            scrape_interval: 5s
+            evaluation_interval: 5s
+
+          scrape_configs:
+            - job_name: "prometheus"
+              static_configs:
+                - targets: ["localhost:{{ prometheus_port }}"]
+
+            - job_name: "node_exporter_local"
+              static_configs:
+                - targets: ["{{ ansible_host | default(inventory_hostname) }}:{{ node_exporter_port_monitoring }}"]
+
+            - job_name: "node_exporter_argentina"
+              static_configs:
+                - targets:
+                    - "{{ node_exporter_argentina_target }}"
+
+            - job_name: "yugabytedb"
+              metrics_path: /prometheus-metrics
+              scrape_interval: 5s
+
+              static_configs:
+                - targets: ["{{ yugabyted_master_http }}"]
+                  labels:
+                    export_type: "master_export"
+
+                - targets: ["{{ yugabyted_tserver_http }}"]
+                  labels:
+                    export_type: "tserver_export"
+
+                - targets: ["{{ yugabyted_ysql_http }}"]
+                  labels:
+                    export_type: "ysql_export"
+
+              relabel_configs:
+                - target_label: "node_prefix"
+                  replacement: "cluster-argentina"
+
+              metric_relabel_configs:
+                - source_labels: ["__name__"]
+                  regex: "(.*)"
+                  target_label: "saved_name"
+                  replacement: "$1"
+
+                - source_labels: ["__name__"]
+                  regex: "handler_latency_(yb_[^_]*)_([^_]*)_([^_]*)(.*)"
+                  target_label: "server_type"
+                  replacement: "$1"
+
+                - source_labels: ["__name__"]
+                  regex: "handler_latency_(yb_[^_]*)_([^_]*)_([^_]*)(.*)"
+                  target_label: "service_type"
+                  replacement: "$2"
+
+                - source_labels: ["__name__"]
+                  regex: "handler_latency_(yb_[^_]*)_([^_]*)_([^_]*)(_sum|_count)?"
+                  target_label: "service_method"
+                  replacement: "$3"
+
+                - source_labels: ["__name__"]
+                  regex: "handler_latency_(yb_[^_]*)_([^_]*)_([^_]*)(_sum|_count)?"
+                  target_label: "__name__"
+                  replacement: "rpc_latency$4"
+
+    - name: Write Alertmanager config
+      ansible.builtin.copy:
+        dest: "{{ alertmanager_config_dir }}/alertmanager.yml"
+        mode: "0644"
+        content: |
+          route:
+            receiver: default
+
+          receivers:
+            - name: default
+              webhook_configs:
+                - url: http://localhost:5001/
+
+    - name: Start monitoring stack via docker compose
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ monitoring_root }}"
+      register: compose_result
+      changed_when: "'Started' in compose_result.stdout or 'Creating' in compose_result.stdout"
+
+    # ---------- node_exporter на monitoring (mon1, порт 9102) ----------
+
+    - name: Ensure node_exporter binary exists (monitoring host)
+      ansible.builtin.stat:
+        path: /usr/local/bin/node_exporter
+      register: node_exporter_bin_monitoring
+
+    - name: Download and install node_exporter if missing (monitoring host)
+      block:
+        - name: Download node_exporter archive
+          ansible.builtin.get_url:
+            url: https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz
+            dest: /tmp/node_exporter.tar.gz
+            mode: "0644"
+
+        - name: Extract node_exporter
+          ansible.builtin.unarchive:
+            src: /tmp/node_exporter.tar.gz
+            dest: /tmp
+            remote_src: yes
+
+        - name: Move node_exporter binary
+          ansible.builtin.copy:
+            src: /tmp/node_exporter-1.8.2.linux-amd64/node_exporter
+            dest: /usr/local/bin/node_exporter
+            mode: "0755"
+      when: not node_exporter_bin_monitoring.stat.exists
+
+    - name: Ensure node_exporter system user exists (monitoring host)
+      ansible.builtin.user:
+        name: node_exporter
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Install node_exporter systemd unit on monitoring host
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/node_exporter.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=node_exporter
+          ExecStart=/usr/local/bin/node_exporter --web.listen-address=0.0.0.0:{{ node_exporter_port_monitoring }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - reload systemd
+        - restart node_exporter
+
+
+- name: Install node_exporter on Argentina DB hosts
+  hosts: argentina
+  become: yes
+
+  vars:
+    node_exporter_port_argentina: 9101
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.command: systemctl daemon-reload
+
+    - name: restart node_exporter
+      ansible.builtin.service:
+        name: node_exporter
+        state: restarted
+        enabled: yes
+
+  tasks:
+    - name: Install base deps (curl)
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+        update_cache: yes
+        state: present
+
+    - name: Ensure node_exporter binary exists (argentina host)
+      ansible.builtin.stat:
+        path: /usr/local/bin/node_exporter
+      register: node_exporter_bin_argentina
+
+    - name: Download and install node_exporter if missing (argentina host)
+      block:
+        - name: Download node_exporter archive
+          ansible.builtin.get_url:
+            url: https://github.com/prometheus/node_exporter/releases/download/v1.8.2/node_exporter-1.8.2.linux-amd64.tar.gz
+            dest: /tmp/node_exporter.tar.gz
+            mode: "0644"
+
+        - name: Extract node_exporter
+          ansible.builtin.unarchive:
+            src: /tmp/node_exporter.tar.gz
+            dest: /tmp
+            remote_src: yes
+
+        - name: Move node_exporter binary
+          ansible.builtin.copy:
+            src: /tmp/node_exporter-1.8.2.linux-amd64/node_exporter
+            dest: /usr/local/bin/node_exporter
+            mode: "0755"
+      when: not node_exporter_bin_argentina.stat.exists
+
+    - name: Ensure node_exporter system user exists (argentina host)
+      ansible.builtin.user:
+        name: node_exporter
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: Install node_exporter systemd unit on Argentina host
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/node_exporter.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=node_exporter
+          ExecStart=/usr/local/bin/node_exporter --web.listen-address=0.0.0.0:{{ node_exporter_port_argentina }}
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - reload systemd
+        - restart node_exporter
