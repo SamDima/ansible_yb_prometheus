@@ -1,0 +1,113 @@
+---
+- name: Verify YugabyteDB Cluster Status
+  hosts: localhost
+  gather_facts: no
+
+  vars:
+    master_nodes:
+      - 80.208.229.107
+      - 80.209.239.227
+      - 212.24.98.67
+    first_master: 80.208.229.107
+    yb_version: "2024.2.6.0-b94"
+
+  tasks:
+    - name: Display header
+      ansible.builtin.debug:
+        msg:
+          - "========================================="
+          - "YugabyteDB Cluster Status Check"
+          - "========================================="
+
+    - name: Check Master nodes status via API
+      ansible.builtin.uri:
+        url: "http://{{ item }}:7000/api/v1/masters"
+        method: GET
+        return_content: yes
+      loop: "{{ master_nodes }}"
+      register: master_status
+      ignore_errors: yes
+
+    - name: Display Master nodes information
+      ansible.builtin.debug:
+        msg: |
+          === MASTER NODES STATUS ===
+          {% for result in master_status.results %}
+          Master on {{ result.item }}:
+          {% if result.failed %}
+            ERROR: Cannot connect to master API
+          {% else %}
+            {% for master in result.json.masters %}
+            {{ master.instance_id.permanent_uuid }}: {{ master.registration.private_rpc_addresses[0].host }}:{{ master.registration.private_rpc_addresses[0].port }} - Role: {{ master.role }}
+            {% endfor %}
+          {% endif %}
+
+          {% endfor %}
+
+    - name: Check Tablet Servers status
+      ansible.builtin.uri:
+        url: "http://{{ first_master }}:7000/api/v1/tablet-servers"
+        method: GET
+        return_content: yes
+      register: tserver_status
+      ignore_errors: yes
+
+    - name: Display Tablet Servers information
+      ansible.builtin.debug:
+        msg: |
+          === TABLET SERVERS STATUS ===
+          {% if tserver_status.failed %}
+          ERROR: Cannot connect to master API
+          {% else %}
+          {% for ts in tserver_status.json %}
+          TServer: {{ ts.registration.common.private_rpc_addresses[0].host }}:{{ ts.registration.common.private_rpc_addresses[0].port }} - Alive: {{ ts.alive }}
+          {% endfor %}
+          {% endif %}
+
+    - name: Check cluster config via YSQL
+      ansible.builtin.shell: |
+        docker run --rm --network host yugabytedb/yugabyte:{{ yb_version }} \
+          bin/ysqlsh -h {{ first_master }} -p 5433 -U yugabyte -c "
+        SELECT
+          host,
+          port,
+          num_live_tablet_servers,
+          is_load_balancer_active
+        FROM yb_servers();"
+      register: cluster_config
+      ignore_errors: yes
+
+    - name: Display cluster configuration
+      ansible.builtin.debug:
+        msg: |
+          === CLUSTER CONFIG via YSQL ===
+          {{ cluster_config.stdout }}
+
+    - name: Check replication info
+      ansible.builtin.shell: |
+        docker run --rm --network host yugabytedb/yugabyte:{{ yb_version }} \
+          bin/ysqlsh -h {{ first_master }} -p 5433 -U yugabyte -c "
+        SHOW yb_server_num_masters;"
+      register: replication_info
+      ignore_errors: yes
+
+    - name: Display replication info
+      ansible.builtin.debug:
+        msg: |
+          === REPLICATION INFO ===
+          {{ replication_info.stdout }}
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "========================================="
+          - "VERIFICATION COMPLETE"
+          - "========================================="
+          - "Expected configuration:"
+          - "- 1 Master in LEADER role"
+          - "- 2 Masters in FOLLOWER role"
+          - "- 3 Tablet Servers (all alive)"
+          - "- Replication factor: 3"
+          - ""
+          - "Check the output above to verify your cluster status"

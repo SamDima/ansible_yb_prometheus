@@ -1,0 +1,197 @@
+---
+- name: Deploy YugabyteDB 3-node cluster
+  hosts: yugabyte_cluster
+  become: yes
+
+  vars:
+    yb_compose_dir: /opt/yb-compose
+    yb_data_master: /var/yugabyte/master
+    yb_data_tserver: /var/yugabyte/tserver
+    yb_version: "{{ hostvars[groups['yugabyte_cluster'][0]]['yb_version'] }}"
+    yb_replication_factor: "{{ hostvars[groups['yugabyte_cluster'][0]]['yb_replication_factor'] }}"
+
+    # Build master addresses from all hosts
+    master_addresses: "{{ groups['yugabyte_cluster'] | map('extract', hostvars, ['ansible_host']) | map('regex_replace', '^(.*)$', '\\1:7100') | join(',') }}"
+
+  tasks:
+    - name: Remove conflicting Docker APT source files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/docker.list
+        - /etc/apt/sources.list.d/docker.sources
+      ignore_errors: yes
+
+    - name: Install base dependencies
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        update_cache: yes
+        state: present
+
+    - name: Create Docker keyring directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+        force: no
+
+    - name: Add Docker APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable"
+        state: present
+        filename: docker
+        update_cache: yes
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure Docker is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create YugabyteDB directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ yb_compose_dir }}"
+        - "{{ yb_data_master }}"
+        - "{{ yb_data_tserver }}"
+
+    - name: Write docker-compose.yml
+      ansible.builtin.copy:
+        dest: "{{ yb_compose_dir }}/docker-compose.yml"
+        mode: '0644'
+        content: |
+          services:
+            yb-master:
+              image: yugabytedb/yugabyte:{{ yb_version }}
+              container_name: yb-master
+              network_mode: host
+              restart: unless-stopped
+              volumes:
+                - {{ yb_data_master }}:/mnt/disk0
+              command: >
+                bin/yb-master
+                --rpc_bind_addresses=0.0.0.0:7100
+                --server_broadcast_addresses={{ ansible_host }}:7100
+                --master_addresses={{ master_addresses }}
+                --replication_factor={{ yb_replication_factor }}
+                --fs_data_dirs=/mnt/disk0
+                --webserver_port=7000
+
+            yb-tserver:
+              image: yugabytedb/yugabyte:{{ yb_version }}
+              container_name: yb-tserver
+              network_mode: host
+              depends_on:
+                - yb-master
+              restart: unless-stopped
+              volumes:
+                - {{ yb_data_tserver }}:/mnt/disk0
+              command: >
+                bin/yb-tserver
+                --tserver_master_addrs={{ master_addresses }}
+                --rpc_bind_addresses=0.0.0.0:9100
+                --server_broadcast_addresses={{ ansible_host }}:9100
+                --fs_data_dirs=/mnt/disk0
+                --pgsql_proxy_bind_address={{ ansible_host }}:5433
+                --cql_proxy_bind_address={{ ansible_host }}:9042
+                --webserver_port=9000
+                --ysql_enable_auth=false
+
+    - name: Stop existing containers (if any)
+      ansible.builtin.command:
+        cmd: docker compose down
+        chdir: "{{ yb_compose_dir }}"
+      ignore_errors: yes
+
+    - name: Start YugabyteDB cluster
+      ansible.builtin.command:
+        cmd: docker compose up -d
+        chdir: "{{ yb_compose_dir }}"
+      register: compose_result
+
+    - name: Wait for YugabyteDB to be ready
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 5433
+        delay: 10
+        timeout: 120
+
+- name: Initialize databases (run only on first node)
+  hosts: yugabyte_cluster[0]
+  become: yes
+
+  vars:
+    yb_version: "{{ hostvars[groups['yugabyte_cluster'][0]]['yb_version'] }}"
+    ysql_host: "{{ ansible_host }}"
+
+  tasks:
+    - name: Wait additional time for cluster formation
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Create databases and users
+      ansible.builtin.shell: |
+        docker run --rm --network host yugabytedb/yugabyte:{{ yb_version }} \
+          bin/ysqlsh -h {{ ysql_host }} -p 5433 -U yugabyte <<'SQL'
+        -- Create databases
+        DROP DATABASE IF EXISTS soap;
+        CREATE DATABASE soap;
+
+        DROP DATABASE IF EXISTS soap2;
+        CREATE DATABASE soap2;
+
+        -- Create users
+        DROP ROLE IF EXISTS superuser;
+        CREATE ROLE superuser WITH LOGIN SUPERUSER PASSWORD 'superpass';
+
+        DROP ROLE IF EXISTS rls_app_user;
+        CREATE ROLE rls_app_user WITH LOGIN PASSWORD 'password';
+
+        GRANT ALL PRIVILEGES ON DATABASE soap TO rls_app_user;
+        GRANT ALL PRIVILEGES ON DATABASE soap2 TO rls_app_user;
+        SQL
+      register: db_init_result
+
+    - name: Show database initialization result
+      ansible.builtin.debug:
+        var: db_init_result.stdout_lines
+
+- name: Display cluster status
+  hosts: yugabyte_cluster
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Check YugabyteDB containers status
+      ansible.builtin.command:
+        cmd: docker ps --filter name=yb- --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+      register: docker_status
+
+    - name: Show container status
+      ansible.builtin.debug:
+        msg:
+          - "Node: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "{{ docker_status.stdout_lines }}"

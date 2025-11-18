@@ -1,0 +1,36 @@
+---
+- name: Cleanup existing YugabyteDB instances
+  hosts: yugabyte_cluster
+  become: yes
+
+  tasks:
+    - name: Stop and remove YugabyteDB containers
+      ansible.builtin.shell: |
+        docker stop yb-master yb-tserver || true
+        docker rm yb-master yb-tserver || true
+      ignore_errors: yes
+
+    - name: Stop docker compose (if exists)
+      ansible.builtin.command:
+        cmd: docker compose down
+        chdir: /opt/yb-compose
+      ignore_errors: yes
+
+    - name: Remove YugabyteDB data directories (OPTIONAL - uncomment if needed)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/yugabyte/master
+        - /var/yugabyte/tserver
+      # Раскомментируйте строку ниже, если хотите удалить данные
+      when: true
+
+    - name: Check remaining containers
+      ansible.builtin.command:
+        cmd: docker ps -a --filter name=yb-
+      register: remaining_containers
+
+    - name: Show remaining containers
+      ansible.builtin.debug:
+        msg: "{{ remaining_containers.stdout_lines }}"
